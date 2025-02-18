@@ -1,6 +1,7 @@
 // extension.js
 const vscode = require('vscode');
 const axios = require('axios');
+require('dotenv').config();
 
 class ErrorDetector {
   constructor() {
