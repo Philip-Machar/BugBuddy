@@ -4,7 +4,7 @@
   "description": "Simplify and explain programming errors",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.97.0"
+    "vscode": "^1.53.0"
   },
   "categories": [
     "Other"
@@ -21,6 +21,10 @@
       {
         "command": "bugbuddy.simplifyError",
         "title": "Simplify Error"
+      },
+      {
+        "command": "bugbuddy.updateApiKey",
+        "title": "BugBuddy: Update OpenAI API Key"
       }
     ],
     "configuration": {
@@ -41,16 +45,17 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "20.x",
-    "@types/vscode": "^1.97.0",
+    "@types/node": "16.x",
+    "@types/vscode": "^1.53.0",
     "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.1",
-    "eslint": "^9.19.0"
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.56.0"
   },
   "dependencies": {
-    "axios": "^1.7.9",
-    "dotenv": "^16.4.7",
+    "@google/generative-ai": "^0.22.0",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
     "node-fetch": "^3.3.2",
-    "openai": "^4.85.1"
+    "openai": "^4.20.1"
   }
 }

@@ -28,9 +28,25 @@ class ErrorDetector {
         console.log('Detecting errors for language:', languageId);
         console.log('Output to check:', output);
         
+        // Skip checking code in comments
+        const commentFilter = (text) => {
+            // Remove JavaScript/Java style comments
+            if (languageId === 'javascript' || languageId === 'java') {
+                text = text.replace(/\/\/.*$/gm, '');
+                text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+            }
+            // Remove Python style comments
+            if (languageId === 'python') {
+                text = text.replace(/#.*$/gm, '');
+            }
+            return text;
+        };
+        
+        const filteredOutput = commentFilter(output);
+        
         const patterns = this.errorPatterns[languageId] || this.errorPatterns.javascript;
         for (const pattern of patterns) {
-            const match = output.match(pattern);
+            const match = filteredOutput.match(pattern);
             if (match) {
                 console.log('Error detected:', match[0]);
                 return {
@@ -88,13 +104,14 @@ class CodeContextGatherer {
 }
 
 class ErrorSimplifier {
-    constructor() {
+    constructor(apiKey) {
+        this.apiKey = apiKey;
         this.detector = new ErrorDetector();
         this.contextGatherer = new CodeContextGatherer();
         
-        if (!process.env.OPENAI_API_KEY) {
-            console.error('OpenAI API key not found');
-            vscode.window.showErrorMessage('OpenAI API key not found. Please add it to your .env file.');
+        if (!this.apiKey) {
+            console.error('Gemini API key not found');
+            vscode.window.showErrorMessage('Gemini API key not found. Please add it via the command.');
         }
     }
 
@@ -103,53 +120,84 @@ class ErrorSimplifier {
             console.log('Attempting to simplify error:', errorMessage);
             console.log('Using context:', context);
 
-            if (!process.env.OPENAI_API_KEY) {
-                throw new Error('OpenAI API key not found');
+            if (!this.apiKey) {
+                throw new Error('Gemini API key not found');
             }
 
-            const prompt = this.constructPrompt(errorMessage, context);
-            console.log('Sending prompt to OpenAI:', prompt);
+            // Show progress notification
+            const progressOptions = {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Analyzing error...',
+                cancellable: false
+            };
+            
+            return await vscode.window.withProgress(progressOptions, async (progress) => {
+                progress.report({ message: 'Connecting to Gemini API...' });
+                
+                const prompt = this.constructPrompt(errorMessage, context);
+                console.log('Sending prompt to Gemini API');
 
-            const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-                model: 'gpt-4',
-                messages: [{
-                    role: 'system',
-                    content: `You are an expert programmer helping to explain errors. 
-                            Format your response in the following sections:
-                            1. 🔍 ERROR SUMMARY: Brief, clear explanation of what went wrong
-                            2. 💡 SOLUTION: Step-by-step fix
-                            3. 🔮 PREVENTION: How to prevent this error in the future`
-                }, {
-                    role: 'user',
-                    content: prompt
-                }],
-                temperature: 0.7,
-                max_tokens: 1000
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-                    'Content-Type': 'application/json'
+                try {
+                    // Gemini API endpoint
+                    const response = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key=${this.apiKey}`, {
+                        contents: [
+                            {
+                                role: "user",
+                                parts: [
+                                    {
+                                        text: prompt
+                                    }
+                                ]
+                            }
+                        ],
+                        generationConfig: {
+                            temperature: 0.7,
+                            maxOutputTokens: 1000,
+                        }
+                    }, {
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+
+                    progress.report({ message: 'Processing explanation...' });
+                    console.log('Gemini API response received');
+
+                    if (!response.data.candidates || !response.data.candidates[0]) {
+                        throw new Error('Invalid response from Gemini API');
+                    }
+
+                    // Extract content from Gemini response
+                    const content = response.data.candidates[0].content;
+                    if (!content || !content.parts || !content.parts[0]) {
+                        throw new Error('Invalid content structure in Gemini API response');
+                    }
+
+                    return content.parts[0].text;
+                } catch (error) {
+                    if (error.response) {
+                        const { status, data } = error.response;
+                        if (status === 401 || status === 403) {
+                            throw new Error('Invalid Gemini API key. Please update your API key.');
+                        } else if (status === 429) {
+                            throw new Error('Gemini API rate limit exceeded. Please try again later.');
+                        }
+                        console.error('Gemini API error details:', data);
+                    }
+                    throw error;
                 }
             });
-
-            console.log('OpenAI response:', response.data);
-
-            if (!response.data.choices || !response.data.choices[0]) {
-                throw new Error('Invalid response from OpenAI');
-            }
-
-            return response.data.choices[0].message.content;
         } catch (error) {
-            console.error('Error calling OpenAI:', error);
-            if (error.response) {
-                console.error('OpenAI API error details:', error.response.data);
-            }
+            console.error('Error calling Gemini API:', error);
             throw new Error(`Failed to simplify error: ${error.message}`);
         }
     }
 
     constructPrompt(errorMessage, context) {
-        return `Please analyze this error:
+        return `Please analyze this error as an expert programmer. Format your response in the following sections:
+        1. 🔍 ERROR SUMMARY: Brief, clear explanation of what went wrong
+        2. 💡 SOLUTION: Step-by-step fix
+        3. 🔮 PREVENTION: How to prevent this error in the future
 
         ERROR MESSAGE:
         ${errorMessage}
@@ -164,9 +212,7 @@ class ErrorSimplifier {
         ${context.code}
         \`\`\`
         
-        ${context.imports ? `IMPORTS/DEPENDENCIES:\n${context.imports}` : ''}
-        
-        Please provide a clear and concise explanation of the error, step-by-step solution, and prevention tips.`;
+        ${context.imports ? `IMPORTS/DEPENDENCIES:\n${context.imports}` : ''}`;
     }
 }
 
@@ -182,11 +228,24 @@ class TerminalDecorator {
     }
 
     highlightError(editor, line) {
-        const range = new vscode.Range(
-            new vscode.Position(line, 0),
-            new vscode.Position(line, editor.document.lineAt(line).text.length)
-        );
-        editor.setDecorations(this.decorationType, [range]);
+        if (!editor) return;
+        
+        try {
+            const range = new vscode.Range(
+                new vscode.Position(line, 0),
+                new vscode.Position(line, editor.document.lineAt(line).text.length)
+            );
+            editor.setDecorations(this.decorationType, [range]);
+        } catch (error) {
+            console.error('Error highlighting text:', error);
+            // Fail silently - decoration is not critical
+        }
+    }
+    
+    clearHighlights(editor) {
+        if (editor) {
+            editor.setDecorations(this.decorationType, []);
+        }
     }
 }
 
@@ -203,8 +262,13 @@ class BugBuddyTerminal {
         );
         this.context = context;
         this.context.subscriptions.push(this.statusBarItem);
+        this.isErrorDetected = false;
         
         // Initialize status bar item
+        this.resetStatusBar();
+    }
+
+    resetStatusBar() {
         this.statusBarItem.text = "$(bug) BugBuddy";
         this.statusBarItem.tooltip = "Click to analyze code";
         this.statusBarItem.command = 'bugbuddy.simplifyError';
@@ -213,15 +277,25 @@ class BugBuddyTerminal {
 
     createTerminal() {
         console.log('Creating BugBuddy terminal');
+        
+        // Dispose existing terminal if any
+        if (this.terminal) {
+            try {
+                this.terminal.dispose();
+            } catch (e) {
+                console.error('Error disposing terminal:', e);
+            }
+        }
+        
         const pty = {
             onDidWrite: this.writeEmitter.event,
             open: () => {
                 this.writeEmitter.fire('🐛 BugBuddy Terminal Active\r\n');
+                this.writeEmitter.fire('Ready to analyze code errors\r\n\r\n');
             },
-            close: () => {
-                this.writeEmitter.dispose();
-            },
+            close: () => {},
             handleInput: (data) => {
+                // Echo back input
                 this.writeEmitter.fire(data);
             }
         };
@@ -237,28 +311,60 @@ class BugBuddyTerminal {
     checkForErrors(document) {
         console.log('Checking for errors...');
         if (!document) return;
+        
+        // Clear previous highlights
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            this.decorator.clearHighlights(editor);
+        }
 
-        const text = document.getText();
-        const errorResult = this.detector.detectError(
-            text,
-            document.languageId
-        );
+        try {
+            const text = document.getText();
+            const errorResult = this.detector.detectError(
+                text,
+                document.languageId
+            );
 
-        if (errorResult) {
-            console.log('Error detected:', errorResult);
-            this.errorBuffer = errorResult.message; // Store just the error message
-            this.showSimplifyButton();
-            const editor = vscode.window.activeTextEditor;
-            if (editor) {
-                this.decorator.highlightError(editor, editor.selection.active.line);
+            if (errorResult) {
+                console.log('Error detected:', errorResult);
+                this.errorBuffer = errorResult.message; // Store just the error message
+                this.isErrorDetected = true;
+                this.showSimplifyButton();
+                
+                if (editor) {
+                    // Try to find line number from error message based on language
+                    let errorLine = editor.selection.active.line;
+                    if (document.languageId === 'javascript') {
+                        const lineMatch = errorResult.message.match(/line (\d+)/i);
+                        if (lineMatch && lineMatch[1]) {
+                            errorLine = parseInt(lineMatch[1], 10) - 1;
+                        }
+                    } else if (document.languageId === 'python') {
+                        const lineMatch = errorResult.message.match(/line (\d+)/i);
+                        if (lineMatch && lineMatch[1]) {
+                            errorLine = parseInt(lineMatch[1], 10) - 1;
+                        }
+                    }
+                    
+                    this.decorator.highlightError(editor, errorLine);
+                }
+            } else {
+                if (this.isErrorDetected) {
+                    this.resetStatusBar();
+                    this.isErrorDetected = false;
+                }
             }
+        } catch (error) {
+            console.error('Error in checkForErrors:', error);
         }
     }
 
     showSimplifyButton() {
         console.log('Showing simplify button');
         this.statusBarItem.text = "$(bug) Simplify Error";
+        this.statusBarItem.tooltip = "Click to get help with the detected error";
         this.statusBarItem.command = 'bugbuddy.simplifyError';
+        this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         this.statusBarItem.show();
     }
 
@@ -287,25 +393,79 @@ ${simplifiedError}
         }
         this.writeEmitter.dispose();
         this.statusBarItem.dispose();
+        this.decorator.clearHighlights(vscode.window.activeTextEditor);
     }
 }
 
-function activate(context) {
+async function activate(context) {
     console.log('Activating BugBuddy extension');
     
     try {
+        // Initialize secret storage
+        const secretStorage = context.secrets;
+        
+        // Check if API key exists in secrets - update key name for Gemini
+        let apiKey = await secretStorage.get('gemini-api-key');
+        
+        // If no Gemini API key in secrets, check for OpenAI key to migrate
+        if (!apiKey) {
+            // First check for old OpenAI key in secrets to migrate
+            const oldKey = await secretStorage.get('openai-api-key');
+            if (oldKey) {
+                console.log('Found OpenAI key, will prompt for Gemini key migration');
+                vscode.window.showInformationMessage('BugBuddy now uses Gemini API. Please update your API key.', 'Update Now')
+                    .then(selection => {
+                        if (selection === 'Update Now') {
+                            vscode.commands.executeCommand('bugbuddy.updateApiKey');
+                        }
+                    });
+            }
+            // Then check .env as fallback (during transition)
+            else if (process.env.GEMINI_API_KEY) {
+                apiKey = process.env.GEMINI_API_KEY;
+                // Save to secrets for future use
+                await secretStorage.store('gemini-api-key', apiKey);
+                console.log('API key migrated from .env to secret storage');
+            }
+        }
+        
+        // Initialize components
         terminal = new BugBuddyTerminal(context);
-        const errorSimplifier = new ErrorSimplifier();
+        const errorSimplifier = new ErrorSimplifier(apiKey);
         const contextGatherer = new CodeContextGatherer();
         const customTerminal = terminal.createTerminal();
         
-        // Register event listeners
+        // Register API key management command
+        let updateKeyCommand = vscode.commands.registerCommand('bugbuddy.updateApiKey', async () => {
+            const enteredKey = await vscode.window.showInputBox({
+                prompt: 'Enter your Gemini API key',
+                placeHolder: 'AIza...',
+                password: true
+            });
+            
+            if (enteredKey) {
+                await secretStorage.store('gemini-api-key', enteredKey);
+                vscode.window.showInformationMessage('Gemini API key updated successfully');
+                // Update the current instance
+                errorSimplifier.apiKey = enteredKey;
+            }
+        });
+        
+        context.subscriptions.push(updateKeyCommand);
+        
+        // Register event listeners with debouncing
+        let documentChangeTimeout = null;
         context.subscriptions.push(
             vscode.workspace.onDidChangeTextDocument(event => {
-                console.log('Document changed');
-                if (vscode.window.activeTextEditor) {
-                    terminal.checkForErrors(event.document);
+                if (documentChangeTimeout) {
+                    clearTimeout(documentChangeTimeout);
                 }
+                
+                documentChangeTimeout = setTimeout(() => {
+                    if (vscode.window.activeTextEditor) {
+                        terminal.checkForErrors(event.document);
+                    }
+                }, 500); // 500ms debounce
             })
         );
 
@@ -323,12 +483,26 @@ function activate(context) {
             terminal.checkForErrors(vscode.window.activeTextEditor.document);
         }
 
-        // Register command
+        // Register simplify error command
         let disposable = vscode.commands.registerCommand(
             'bugbuddy.simplifyError',
             async () => {
                 console.log('Simplify Error command triggered');
                 try {
+                    // Check for API key first
+                    if (!errorSimplifier.apiKey) {
+                        const shouldConfigure = await vscode.window.showInformationMessage(
+                            'Gemini API key is required to analyze errors.', 
+                            'Configure API Key'
+                        );
+                        
+                        if (shouldConfigure === 'Configure API Key') {
+                            vscode.commands.executeCommand('bugbuddy.updateApiKey');
+                            return;
+                        }
+                        return;
+                    }
+                    
                     const editor = vscode.window.activeTextEditor;
                     if (!editor) {
                         vscode.window.showErrorMessage('No active editor');
@@ -344,16 +518,28 @@ function activate(context) {
                         return;
                     }
 
-                    // Show loading message
-                    vscode.window.showInformationMessage('Analyzing error...');
+                    try {
+                        const simplifiedError = await errorSimplifier.simplifyError(
+                            terminal.errorBuffer || 'Error in selected code',
+                            errorContext
+                        );
 
-                    const simplifiedError = await errorSimplifier.simplifyError(
-                        terminal.errorBuffer || 'Error in selected code',
-                        errorContext
-                    );
-
-                    terminal.showSimplifiedError(errorContext.code, simplifiedError);
-                    customTerminal.show();
+                        terminal.showSimplifiedError(errorContext.code, simplifiedError);
+                        customTerminal.show();
+                    } catch (error) {
+                        if (error.message.includes('API key')) {
+                            const shouldUpdate = await vscode.window.showErrorMessage(
+                                `Error: ${error.message}`, 
+                                'Update API Key'
+                            );
+                            
+                            if (shouldUpdate === 'Update API Key') {
+                                vscode.commands.executeCommand('bugbuddy.updateApiKey');
+                            }
+                        } else {
+                            vscode.window.showErrorMessage(`Error: ${error.message}`);
+                        }
+                    }
                 } catch (error) {
                     console.error('Error in simplifyError command:', error);
                     vscode.window.showErrorMessage(`Error: ${error.message}`);
@@ -384,3 +570,5 @@ module.exports = {
     activate,
     deactivate
 };
+
+
