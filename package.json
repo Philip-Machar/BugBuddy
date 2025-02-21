@@ -10,8 +10,10 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:bugbuddy.simplifyError",
-    "onStartupFinished"
+    "onStartupFinished",
+    "onLanguage:javascript",
+    "onLanguage:python",
+    "onLanguage:java"
   ],
   "main": "./extension.js",
   "contributes": {
